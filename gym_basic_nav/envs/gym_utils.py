@@ -15,15 +15,9 @@ class Interactive(object):
         self.bot_left  = np.array(bot_left)
         self.top_left  = np.array(top_left)
 
-        self.center = np.mean([top_right, bot_right, bot_left, top_left])
+        self.center = np.array([0.5*(top_right[0]+top_left[0]), 0.5*(top_right[1]+bot_right[1])])
         self.width = top_right[0]-top_left[0]
         self.height = top_right[1]-bot_right[1]
-
-    def interact(self):
-        pass
-
-    def remove(self):
-        pass
 
     def distance_to_point(self, p):
         return point_to_rectangle_distance(p, self.center, self.width, self.height)
@@ -41,12 +35,41 @@ class Interactive(object):
 
 class WorldMap(object):
     def __init__(self, x_range, y_range, interactives):
+        self.x_range = int(x_range)
+        self.y_range = int(y_range)
+        self.image = 255*np.ones((self.y_range, self.x_range, int(3)))
+
         self.objects = interactives
         self.obstacles = list(filter(lambda o: not o.interactive, interactives))
         self.interactives = list(filter(lambda o: o.interactive, interactives))
 
+        for obs in self.obstacles:
+            r = obs.center[1]
+            c = obs.center[0]
+            min_row = max(int(r - obs.height/2.0), 0)
+            max_row = min(int(r + obs.height/2.0), self.y_range-1)
+
+            min_col = max(int(c - obs.width/2.0), 0)
+            max_col = min(int(c + obs.width/2.0), self.x_range-1)
+
+            if obs.permanent:
+                self.image[min_row:max_row, min_col:max_col, :] = (204, 153, 102)
+            else:
+                self.image[min_row:max_row, min_col:max_col, :] = (204, 204, 0)
+
+        for obs in self.interactives:
+            r = obs.center[1]
+            c = obs.center[0]
+            min_row = max(int(r - obs.height/2.0), 0)
+            max_row = min(int(r + obs.height/2.0), self.y_range-1)
+
+            min_col = max(int(c - obs.width/2.0), 0)
+            max_col = min(int(c + obs.width/2.0), self.x_range-1)
+
+            self.image[min_row:max_row, min_col:max_col, :] = (0, 127, 0)
+
     def location_of_interactives(self):
-        locs = [i.center for i in self.interactives]
+        locs = np.array([i.center for i in self.interactives]).flatten()
         return locs
 
     def range_and_bearing_to_closest_obstacle(self, x, y):
@@ -58,6 +81,43 @@ class WorldMap(object):
         cp = closest_obstacle.closest_point_to(p)
         bearing_to_closest_obstacle = atan2(cp[1]-y, cp[0]-x)
         return distance_to_closest_obstacle, bearing_to_closest_obstacle
+
+    def point_is_in_obstacle(self, x, y, epsilon=0.25):
+        row = int(y)
+        col = int(x)
+
+        if (row >=0 and row < self.image.shape[0] and col >= 0 and col < self.image.shape[1]):
+            return (self.image[row, col, :] == (204, 153, 102) or self.image[row,col, :] == (204, 204, 0)).all()
+        else:
+            return False
+
+    def segment_is_in_obstacle(self, x1,y1, x2,y2, epsilon=0.5):
+        # Note: this is assuming that 1px = 1m
+        a = np.array([x1,y1])
+        b = np.array([x2,y2])
+        L = np.linalg.norm(b-a)
+        return any([self.point_is_in_obstacle(a[0] + i/L*(b[0]-a[0]), a[1] + i/L*(b[1]-a[1])) for i in range(ceil(L))])
+
+    def point_is_in_keyzone(self, x, y):
+        row = int(y)
+        col = int(x)
+
+        return (self.image[row, col, :] == (0, 127, 0)).any()
+
+    def remove_wall(self):
+        for obs in self.obstacles:
+            if not obs.permanent:
+                r = obs.center[1]
+                c = obs.center[0]
+                min_row = max(int(r - obs.height/2.0), 0)
+                max_row = min(int(r + obs.height/2.0), self.y_range-1)
+
+                min_col = max(int(c - obs.width/2.0), 0)
+                max_col = min(int(c + obs.width/2.0), self.x_range-1)
+
+                self.image[min_row:max_row, min_col:max_col, :] = (255, 255, 255)
+
+        self.obstacles = list(filter(lambda o: o.permanent, self.obstacles))
 
 
 

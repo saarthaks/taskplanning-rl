@@ -5,8 +5,8 @@ from gym.utils import seeding
 from math import pi, cos, sin
 import numpy as np
 
-import gym_rendering
-from gym_utils import Interactive, WorldMap
+from . import gym_rendering
+from .gym_utils import Interactive, WorldMap
 
 class NavEnv(gym.Env):
     '''
@@ -31,7 +31,7 @@ class NavEnv(gym.Env):
 
         obs1  = Interactive((55,45), (55,0), (45,0), (45,45), interactive=False, permanent=True)
         obs2  = Interactive((55,100), (55,55), (45,55), (45,100), interactive=False, permanent=True)
-        block = Interactive((55,55), (55,45), (45,45), (45,55), interactive=True, permanent=False)
+        block = Interactive((55,55), (55,45), (45,45), (45,55), interactive=False, permanent=False)
         key   = Interactive((15,15), (15,5), (5,5), (5,15), interactive=True, permanent=True)
         self.world = WorldMap(self.max_x, self.max_y, [obs1, obs2, block, key])
 
@@ -77,7 +77,6 @@ class NavEnv(gym.Env):
         dx = v*cos(theta)
         dy = v*sin(theta)
 
-        #TODO: implement picking up object and finishing
         pickup = (1-action[3] < 1e-6)
         attempt_finish = (1-action[4] < 1e-6)
 
@@ -86,18 +85,31 @@ class NavEnv(gym.Env):
         done = False
         info = {}
 
-        if (np.linalg.norm(self.destination-self.state) < self.destination_tol) and attempt_finish:
+        if attempt_finish and (np.linalg.norm(self.destination-self.state) < self.destination_tol):
             reward = 20
             done = True
 
-        #TODO: implement obstacle collision
+        if self.world.point_is_in_obstacle(self.state[0], self.state[1], epsilon=0.25):
+            reward = -5 # for hitting an obstacle
 
-        self.observation = self._get_observation(self.state)
+        if self.world.segment_is_in_obstacle(old_state[0], old_state[1],
+                                                   self.state[0], self.state[1],
+                                                   epsilon=0.25):
+            reward = -5 # for hitting an obstacle
+
+        if reward != 5:
+            if pickup and self.state[2] != 1 and self.world.point_is_in_keyzone(self.state[0], self.state[1]):
+                reward = 0
+                self.state[2] = 1
+                self.world.remove_wall()
+
+        self.observation = self._get_observation()
         return self.observation, reward, done, info
 
     def reset(self):
+        obs = self._get_observation()
         self.state = self.init_state
-        return self._get_observation(self.state)
+        return obs
 
     def render(self, mode='human', close=False):
         
@@ -113,7 +125,7 @@ class NavEnv(gym.Env):
         if self.viewer is None:
             self.viewer = gym_rendering.Viewer(screen_width, screen_height)
             self._append_elements_to_viewer(self.viewer, screen_width,
-                    screen_height, obstacles=self.world.interactives,
+                    screen_height, objects=self.world.objects,
                     destination=self.destination,
                     destination_tol=self.destination_tol)
 
@@ -133,20 +145,27 @@ class NavEnv(gym.Env):
         viewer.add_onetime(polygon)
 
     def _append_elements_to_viewer(self, viewer, width, height,
-            interactives=[], destination=None, destination_tol=None):
+            objects=None, destination=None, destination_tol=None):
 
         viewer.set_bounds(left=-100, right=width+100, bottom=-100,
                 top=height+100)
 
-        #TODO: add interactives with correct colors
-        for i, ob in enumerate(interactives):
-            rect = gym_rendering.FilledPolygon([ob.top_right, ob.bot_right, ob.bot_left, ob.top_left])
-            tr = gym_rendering.Transform(translation=(ob.c[0],ob.c[1]))
-            rect.add_attr(tr)
-            if ob.permanent and not ob.interactive:
-                rect.set_color(0.8, 0.6, 0.4)
+        if not (objects is None):
+            for i, ob in enumerate(objects):
+                if self.state[2] == 1 and (ob.permanent and ob.interactive):     # only add key if not yet picked up
+                    continue
 
-            viewer.add_geom(rect)
+                rect = gym_rendering.FilledPolygon([ob.top_right, ob.bot_right, ob.bot_left, ob.top_left])
+                tr = gym_rendering.Transform(translation=(ob.c[0], ob.c[1]))
+                rect.add_attr(tr)
+                if ob.permanent and not ob.interactive:     # if object
+                    rect.set_color(0.8, 0.6, 0.4)
+                elif not ob.permanent and ob.interactive:   # if movable wall
+                    rect.set_color(0.8, 0.8, 0.0)
+                elif ob.permanent and ob.interactive:       # if key
+                    rect.set_color(0.0, 0.5, 0.0)
+
+                viewer.add_geom(rect)
 
         if not (destination is None):
             tr = gym_rendering.Transform(translation=(destination[0],
@@ -157,11 +176,12 @@ class NavEnv(gym.Env):
             polygon.set_color(1.0, 0., 0.)
             viewer.add_geom(polygon)
 
-    def _get_observation(self, state):
+    def _get_observation(self):
         
-        #TODO: include distance and angle to closest obstacle and interactives
-        obs = np.array([state[0], state[1], state[2], self.destination[0],
-            self.destination[1]])
+        interactives_loc = self.world.location_of_interactives() if self.state[2] == 0 else self.state[0:2]
+        dist_to_closest_obs, angl_to_closest_obs = self.world.range_and_bearing_to_closest_obstacle(self.state[0], self.state[1])
+        obs = np.array([self.state[0], self.state[1], self.state[2], dist_to_closest_obs, angl_to_closest_obs, self.destination[0],
+            self.destination[1], interactives_loc[0], interactives_loc[1]])
 
         return obs
 

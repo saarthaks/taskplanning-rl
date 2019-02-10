@@ -8,10 +8,10 @@ import numpy as np
 
 RAD2DEG = 57.29577951308232
 
-def get_display(spec)
+def get_display(spec):
     if spec is None:
         return None
-    elif isinstance(spec, six.string_types)
+    elif isinstance(spec, six.string_types):
         return pyglet.canvas.Display(spec)
     else:
         raise error.Error('Invalid display specification: {}. (Must be a string like :0 or None.)'.format(spec))
@@ -120,6 +120,9 @@ class Color(object):
 
     def enable(self):
         gl.glColor4f(*self.vec4)
+
+    def disable(self):
+        pass
 
 class Geom(object):
     def __init__(self):
