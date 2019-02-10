@@ -55,7 +55,7 @@ class WorldMap(object):
             if obs.permanent:
                 self.image[min_row:max_row, min_col:max_col, :] = (204, 153, 102)
             else:
-                self.image[min_row:max_row, min_col:max_col, :] = (204, 204, 0)
+                self.image[min_row:max_row, min_col:max_col, :] = (179, 102, 204)
 
         for obs in self.interactives:
             r = obs.center[1]
@@ -87,9 +87,9 @@ class WorldMap(object):
         col = int(x)
 
         if (row >=0 and row < self.image.shape[0] and col >= 0 and col < self.image.shape[1]):
-            return (self.image[row, col, :] == (204, 153, 102) or self.image[row,col, :] == (204, 204, 0)).all()
+            return (self.image[row, col, :] == (204, 153, 102)).all() or (self.image[row, col, :] == (179, 102, 204)).all()
         else:
-            return False
+            return True
 
     def segment_is_in_obstacle(self, x1,y1, x2,y2, epsilon=0.5):
         # Note: this is assuming that 1px = 1m
@@ -102,7 +102,7 @@ class WorldMap(object):
         row = int(y)
         col = int(x)
 
-        return (self.image[row, col, :] == (0, 127, 0)).any()
+        return (self.image[row, col, :] == (0, 127, 0)).all()
 
     def remove_wall(self):
         for obs in self.obstacles:
