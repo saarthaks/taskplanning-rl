@@ -47,10 +47,10 @@ class WorldMap(object):
             r = obs.center[1]
             c = obs.center[0]
             min_row = max(int(r - obs.height/2.0), 0)
-            max_row = min(int(r + obs.height/2.0), self.y_range-1)
+            max_row = min(int(r + obs.height/2.0), self.y_range)
 
             min_col = max(int(c - obs.width/2.0), 0)
-            max_col = min(int(c + obs.width/2.0), self.x_range-1)
+            max_col = min(int(c + obs.width/2.0), self.x_range)
 
             if obs.permanent:
                 self.image[min_row:max_row, min_col:max_col, :] = (204, 153, 102)

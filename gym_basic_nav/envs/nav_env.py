@@ -16,7 +16,7 @@ class NavEnv(gym.Env):
     '''
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, initial_state=(25.0, 25.0, 0.0)):
+    def __init__(self):
         self.min_x = 0.0
         self.max_x = 500.0
         self.min_y = 0.0
@@ -34,11 +34,14 @@ class NavEnv(gym.Env):
         block = Interactive((275,275), (275,225), (225,225), (225,275), interactive=False, permanent=False)
         key   = Interactive((75,475), (75,425), (25,425), (25,475), interactive=True, permanent=True)
         self.world = WorldMap(self.max_x, self.max_y, [obs1, obs2, block, key])
+        # self.world = WorldMap(self.max_x, self.max_y, [obs1, obs2, key])
 
         self.low_state = np.array([self.min_x, self.min_y, self.min_have_object])
         self.high_state = np.array([self.max_x, self.max_x,
             self.max_have_object])
 
+        self.seed()
+        initial_state = (float(np.random.randint(199)+10), float(np.random.randint(399)+10), 0.0)
         self.init_state = np.array(initial_state)
         self.state = np.array(initial_state)
 
@@ -56,14 +59,21 @@ class NavEnv(gym.Env):
         self.high_action = np.array([self.max_speed, self.max_angle,
             self.max_finish, self.max_pickup])
 
+        self.min_dist = 0.0
+        self.max_dist = np.linalg.norm([self.max_x-self.min_x, self.max_y-self.min_y])
+
+        self.low_obs  = np.array([self.min_x, self.min_y, self.min_have_object, self.min_dist, self.min_angle,
+                                  self.destination[0], self.destination[1], self.min_x, self.min_y])
+        self.high_obs = np.array([self.max_x, self.max_y, self.max_have_object, self.max_dist, self.max_angle,
+                                  self.destination[0], self.destination[1], self.max_x, self.max_y])
+
         self.viewer = None
 
         self.action_space = spaces.Box(low=self.low_action,
                 high=self.high_action, dtype=np.float32)
-        self.observation_space = spaces.Box(low=self.low_state,
-                high=self.high_state, dtype=np.float32)
+        self.observation_space = spaces.Box(low=self.low_obs,
+                high=self.high_obs, dtype=np.float32)
 
-        self.seed()
         self.reset()
 
     def seed(self, seed=None):
@@ -72,44 +82,41 @@ class NavEnv(gym.Env):
 
     def step(self, action):
         old_state = self.state.copy()
-        v = action[0]
-        theta = action[1]
+        v = action[0] * (self.max_speed - self.min_speed)
+        theta = action[1] * 2 * pi
         dx = v*cos(theta)
         dy = v*sin(theta)
 
-        pickup = (1-action[3] < 1e-6)
-        attempt_finish = (1-action[2] < 1e-6)
+        pickup = (1-action[3] < 0.5)
+        attempt_finish = (1-action[2] < 0.5)
 
-        self.state += np.array([dx, dy, 0])
-        reward = -1
+        new_state = self.state + np.array([dx, dy, 0])
+        reward = -1e-3 * 1/(v + 1e-4)
         done = False
         info = {}
 
-        if attempt_finish and (np.linalg.norm(self.destination-self.state[0:2]) < self.destination_tol):
+        if attempt_finish and (np.linalg.norm(self.destination-new_state[0:2]) < self.destination_tol):
+            self.state = new_state
             reward = 20
             done = True
 
-        if self.world.point_is_in_obstacle(self.state[0], self.state[1], epsilon=0.25):
-            reward = -5 # for hitting an obstacle
-
-        if self.world.segment_is_in_obstacle(old_state[0], old_state[1],
-                                                   self.state[0], self.state[1],
+        if self.world.point_is_in_obstacle(new_state[0], new_state[1], epsilon=0.25) or \
+                self.world.segment_is_in_obstacle(old_state[0], old_state[1],
+                                                   new_state[0], new_state[1],
                                                    epsilon=0.25):
             reward = -5 # for hitting an obstacle
-
-        if reward != -5:
+        else:
+            self.state = new_state
             if pickup and self.state[2] != 1 and self.world.point_is_in_keyzone(self.state[0], self.state[1]):
-                reward = 0
+                reward = 10
                 self.state[2] = 1
                 self.world.remove_wall()
-        else:
-            self.state = old_state
 
-        self.observation = self._get_observation()
+        self.observation = self._get_observation(self.state)
         return self.observation, reward, done, info
 
     def reset(self):
-        obs = self._get_observation()
+        obs = self._get_observation(self.init_state)
         self.state = self.init_state
         return obs
 
@@ -182,11 +189,11 @@ class NavEnv(gym.Env):
             polygon.set_color(1.0, 0., 0.)
             viewer.add_geom(polygon)
 
-    def _get_observation(self):
+    def _get_observation(self, state):
         
-        interactives_loc = self.world.location_of_interactives() if self.state[2] == 0 else self.state[0:2]
-        dist_to_closest_obs, angl_to_closest_obs = self.world.range_and_bearing_to_closest_obstacle(self.state[0], self.state[1])
-        obs = np.array([self.state[0], self.state[1], self.state[2], dist_to_closest_obs, angl_to_closest_obs, self.destination[0],
+        interactives_loc = self.world.location_of_interactives() if state[2] == 0 else state[0:2]
+        dist_to_closest_obs, angl_to_closest_obs = self.world.range_and_bearing_to_closest_obstacle(state[0], state[1])
+        obs = np.array([state[0], state[1], state[2], dist_to_closest_obs, angl_to_closest_obs, self.destination[0],
             self.destination[1], interactives_loc[0], interactives_loc[1]])
 
         return obs
