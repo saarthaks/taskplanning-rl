@@ -6,7 +6,7 @@ from itertools import zip_longest
 from stable_baselines.a2c.utils import linear
 from stable_baselines.common.policies import FeedForwardPolicy, register_policy
 
-def observation_input(ob_space, z_dim, batch_size=None, name='Ob', scale=False):
+def observation_skill_input(ob_space, z_dim, batch_size=None, name='Obz', scale=False):
     """
     Build observation input with encoding depending on the observation space type
     When using Box ob_space, the input will be normalized between [1, 0] on the bounds ob_space.low and ob_space.high.
@@ -18,17 +18,23 @@ def observation_input(ob_space, z_dim, batch_size=None, name='Ob', scale=False):
     :param scale: (bool) whether or not to scale the input
     :return: (TensorFlow Tensor, TensorFlow Tensor) input_placeholder, processed_input_tensor
     """
-    #TODO: add z_dim to observation input
-    observation_ph = tf.placeholder(shape=(batch_size,) + ob_space.shape, dtype=ob_space.dtype, name=name)
-    processed_observations = tf.to_float(observation_ph)
+    #TODO: refine z_low and z_high -- [0,1] currently
+    input_shape = (ob_space.shape[0] + z_dim,)
+    low_in = np.zeros(input_shape)
+    low_in[:ob_space.shape[0]] = ob_space.low
+    high_in = np.ones(input_shape)
+    high_in[:ob_space.shape[0]] = ob_space.high
+
+    input_ph = tf.placeholder(shape=(batch_size,) + input_shape, dtype=ob_space.dtype, name=name)
+    processed_input = tf.to_float(input_ph)
     # rescale to [1, 0] if the bounds are defined
     if (scale and
-       not np.any(np.isinf(ob_space.low)) and not np.any(np.isinf(ob_space.high)) and
-       np.any((ob_space.high - ob_space.low) != 0)):
+       not np.any(np.isinf(low_in)) and not np.any(np.isinf(high_in)) and
+       np.any((high_in - low_in) != 0)):
 
         # equivalent to processed_observations / 255.0 when bounds are set to [255, 0]
-        processed_observations = ((processed_observations - ob_space.low) / (ob_space.high - ob_space.low))
-        return observation_ph, processed_observations
+        processed_input = ((processed_input - low_in) / (high_in - low_in))
+    return input_ph, processed_input
 
 def mlp_extractor(flat_observations, net_arch, act_fun):
     """
@@ -86,18 +92,98 @@ def mlp_extractor(flat_observations, net_arch, act_fun):
 
     return latent_policy, latent_value
 
+def trajectory_input(traj_size, batch_size=None):
+    """
+    Build trajectory input given trajectory size
+    :param traj_size: (int) dimensionality of a flattened trajectory
+    :param batch_size: (int) batch size for input
+                       (default is None, so that resulting input placeholder can take tensors with any batch size)
+    :return: (TensorFlow Tensor, TensorFlow Tensor) traj_placeholder, processed_traj_tensor
+    """
+    trajectory_ph = tf.placeholder(shape=(batch_size,) + (traj_size,), dtype=tf.float32, name="traj")
+    processed_trajectory = tf.to_float(trajectory_ph)
+    return trajectory_ph, processed_trajectory
+
+def encoder(flat_trajectory, enc_arch, z_dim, act_fun):
+    """
+    Constructs an MLP that receives trajectories as an input and outputs a latent representation for the skill
+    embedding network. The ``enc_arch`` parameter allows to specify the amount and size of the hidden layers.
+    :param flat_trajectory: (tf.Tensor) The trajectory to base skill embedding network on.
+    :param enc_arch: ([int]) The specification of the skill embedding network.
+    :param act_fun: (tf function) The activation function to use for the networks.
+    :param z_dim: (int) The dimensionality of the skill-space
+    :return: (tf.Tensor, tf.Tensor, tf.Tensor) latent_skill, mean, standard deviation of the specified network.
+    """
+    latent_skill = flat_trajectory
+    for idx, layer_size in enumerate(enc_arch):
+        latent_skill = act_fun(linear(latent_skill, "enc_fc{}".format(idx), layer_size, init_scale=np.sqrt(2)))
+
+    mn = act_fun(linear(latent_skill, "zmean", z_dim, init_scale=np.sqrt(2)))
+    sd = 0.5 * act_fun(linear(latent_skill, "zstd", z_dim, init_scale=np.sqrt(2)))
+    eps = tf.random_normal(shape=[tf.shape(latent_skill)[0], z_dim], mean=0.0, stddev=1.0)
+    z  = mn + tf.multiply(eps, tf.exp(sd))
+    return z, mn, sd
+
+def skill_input(z_dim, batch_size=None):
+    """
+    Build trajectory input given trajectory size
+    :param traj_size: (int) dimensionality of a flattened trajectory
+    :param batch_size: (int) batch size for input
+                       (default is None, so that resulting input placeholder can take tensors with any batch size)
+    :param z_dim: (int) dimensionality of flattened skill embedding
+    :param batch_size: (int) batch size for input
+                       (default is None, so that resulting input placeholder can take tensors with any batch size)
+    :return: (tf.Tensor, tf.Tensor) skill_placeholder, processed_skill_tensor
+    """
+    skill_ph = tf.placeholder(shape=(batch_size,) + (z_dim,), dtype=tf.float32, name="z_sample")
+    processed_skill = tf.to_float(skill_ph)
+    return skill_ph, processed_skill
+
+def decoder(flat_skill, dec_arch, traj_size, act_fun):
+    """
+    Constructs an MLP that receives skill embeddings as an input and outputs a expected trajectory. The ``dec_arch``
+    parameter allows to specify the amount and size of the hidden layers.
+    :param flat_skill: (tf.Tensor) The skill to base trajectory decoding on.
+    :param dec_arch: ([int]) The specification of the trajectory decoding network.
+    :param traj_size: (int) The dimensionality of the trajectory-space
+    :param act_fun: (tf function) The activation function to use for the networks.
+    :return: (tf.Tensor) expected_trajectory of the specified network
+    """
+    traj_hat = flat_skill
+    for idx, layer_size in enumerate(dec_arch):
+        traj_hat = act_fun(linear(traj_hat, "dec_fc{}".format(idx), layer_size, init_scale=np.sqrt(2)))
+
+    traj_hat = act_fun(linear(traj_hat, "traj_hat", traj_size, init_scale=np.sqrt(2)))
+    return traj_hat
+
 class LatentSkillsPolicy(FeedForwardPolicy):
-    def __init__(self, sess, ob_space, ac_space, z_dim, n_env, n_steps, n_batch, reuse=False, **_kwargs):
+    def __init__(self, sess, ob_space, st_space, ac_space, z_dim, traj_len, n_env, n_steps, n_batch, reuse=False, **_kwargs):
         super(LatentSkillsPolicy, self).__init__(sess, ob_space, ac_space, n_env, n_steps, n_batch, reuse,
                                                  feature_extraction="mlp", **_kwargs)
 
+        # TODO: Set up VAE inputs, model, and outputs
+        # sets up trajectory inputs for vae encoder network
+        traj_size = traj_len * st_space.shape[0] * ac_space.shape[0]
+        with tf.variable_scope("skill_encoder_input", reuse=False):
+            self.traj_ph, self.processed_traj = trajectory_input(traj_size, n_batch)
+
+        with tf.variable_scope("skill_encoder_model", reuse=False):
+            self.z_sample, self.z_mean, self.z_stddev = \
+                encoder(tf.layers.flatten(self.processed_traj), self.enc_arch, z_dim, self.act_fun)
+
+        with tf.variable_scope("skill_decoder_input", reuse=False):
+            self.skill_ph, self.processed_skill = skill_input(z_dim, n_batch)
+
+        with tf.variable_scope("skill_decoder_model", reuse=False):
+            self.traj_hat = decoder(tf.layers.flatten(self.processed_skill), self.dec_arc, traj_size, self.act_fun)
+
         # sets up observation space inputs for policy and value function networks
-        with tf.variable_scope("input", reuse=False):
-            self.obs_ph, self.processed_obs = observation_input(ob_space, z_dim, n_batch, scale=False)     # unscaled b/c mlp, not cnn
+        with tf.variable_scope("obz_input", reuse=False):
+            self.input_ph, self.processed_input = observation_skill_input(ob_space, z_dim, n_batch, scale=False)     # unscaled b/c mlp, not cnn
 
         # sets up shapes/models of policy and value function networks
         with tf.variable_scope("model", reuse=reuse):
-            pi_latent, vf_latent = mlp_extractor(tf.layers.flatten(self.processed_obs), self.net_arch, self.act_fun)
+            pi_latent, vf_latent = mlp_extractor(tf.layers.flatten(self.processed_input), self.net_arch, self.act_fun)
 
             self.value_fn = linear(vf_latent, 'vf', 1)
 
@@ -111,11 +197,15 @@ class LatentSkillsPolicy(FeedForwardPolicy):
         # TODO: May need to change outputs of policy networks?
         self._setup_init()
 
-        # TODO: Set up VAE inputs, model, and outputs
-
-    def step(self, obs, state=None, mask=None, determinstic=False):
-        #TODO
-        return NotImplementedError
+    def step(self, obs, state=None, mask=None, deterministic=False):
+        #TODO: add self.z_sample to input
+        if deterministic:
+            action, value, neglogp = self.sess.run([self.deterministic_action, self._value, self.neglogp],
+                                                   {self.input_ph: obs})
+        else:
+            action, value, neglogp = self.sess.run([self.action, self._value, self.neglogp],
+                                                   {self.input_ph: obs})
+        return action, value, self.initial_state, neglogp
 
     def proba_step(self, obs, state=None, mask=None):
         #TODO
