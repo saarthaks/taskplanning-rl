@@ -172,6 +172,9 @@ class Runner(AbstractEnvRunner):
                 if maybe_ep_info is not None:
                     ep_infos.append(maybe_ep_info)
             mb_rewards.append(rewards)
+
+            new_state = self.env.state
+
         # batch of steps to batch of rollouts
         mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype)
         mb_rewards = np.asarray(mb_rewards, dtype=np.float32)
