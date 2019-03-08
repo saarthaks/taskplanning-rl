@@ -6,7 +6,7 @@ from itertools import zip_longest
 from stable_baselines.a2c.utils import linear, lstm
 from stable_baselines.common.policies import FeedForwardPolicy, register_policy
 
-def observation_skill_input(ob_space, z_dim, batch_size=None, name='Obz', scale=False):
+def observation_input(ob_space, batch_size=None, name='Obz', scale=False):
     """
     Build observation input with encoding depending on the observation space type
     When using Box ob_space, the input will be normalized between [1, 0] on the bounds ob_space.low and ob_space.high.
@@ -18,14 +18,10 @@ def observation_skill_input(ob_space, z_dim, batch_size=None, name='Obz', scale=
     :param scale: (bool) whether or not to scale the input
     :return: (TensorFlow Tensor, TensorFlow Tensor) input_placeholder, processed_input_tensor
     """
-    #TODO: refine z_low and z_high -- [0,1] currently
-    input_shape = (ob_space.shape[0] + z_dim,)
-    low_in = np.zeros(input_shape)
-    low_in[:ob_space.shape[0]] = ob_space.low
-    high_in = np.ones(input_shape)
-    high_in[:ob_space.shape[0]] = ob_space.high
+    low_in = ob_space.low
+    high_in = ob_space.high
 
-    input_ph = tf.placeholder(shape=(batch_size,) + input_shape, dtype=ob_space.dtype, name=name)
+    input_ph = tf.placeholder(shape=(batch_size,) + ob_space.shape, dtype=ob_space.dtype, name=name)
     processed_input = tf.to_float(input_ph)
     # rescale to [1, 0] if the bounds are defined
     if (scale and
@@ -93,61 +89,12 @@ def mlp_extractor(flat_observations, net_arch, act_fun):
 
     return latent_policy, latent_value
 
-def trajectory_input(traj_size, batch_size=None):
-    """
-    Build trajectory input given trajectory size
-    :param traj_size: (int) dimensionality of a flattened trajectory
-    :param batch_size: (int) batch size for input
-                       (default is None, so that resulting input placeholder can take tensors with any batch size)
-    :return: (TensorFlow Tensor, TensorFlow Tensor) traj_placeholder, processed_traj_tensor
-    """
-    trajectory_ph = tf.placeholder(shape=(batch_size,) + (traj_size,), dtype=tf.float32, name="traj")
-    processed_trajectory = tf.to_float(trajectory_ph)
-    return trajectory_ph, processed_trajectory
-
-
-def skill_input(z_dim, batch_size=None):
-    """
-    Build trajectory input given trajectory size
-    :param traj_size: (int) dimensionality of a flattened trajectory
-    :param batch_size: (int) batch size for input
-                       (default is None, so that resulting input placeholder can take tensors with any batch size)
-    :param z_dim: (int) dimensionality of flattened skill embedding
-    :param batch_size: (int) batch size for input
-                       (default is None, so that resulting input placeholder can take tensors with any batch size)
-    :return: (tf.Tensor, tf.Tensor) skill_placeholder, processed_skill_tensor
-    """
-    skill_ph = tf.placeholder(shape=(batch_size,) + (z_dim,), dtype=tf.float32, name="z_sample")
-    processed_skill = tf.to_float(skill_ph)
-    return skill_ph, processed_skill
-
-
-def decoder(flat_skill, dec_arch, traj_size, act_fun):
-    """
-    Constructs an MLP that receives skill embeddings as an input and outputs a expected trajectory. The ``dec_arch``
-    parameter allows to specify the amount and size of the hidden layers.
-    :param flat_skill: (tf.Tensor) The skill to base trajectory decoding on.
-    :param dec_arch: ([int]) The specification of the trajectory decoding network.
-    :param traj_size: (int) The dimensionality of the trajectory-space
-    :param act_fun: (tf function) The activation function to use for the networks.
-    :return: (tf.Tensor) expected_trajectory of the specified network
-    """
-    traj_hat = flat_skill
-    for idx, layer_size in enumerate(dec_arch):
-        traj_hat = act_fun(linear(traj_hat, "dec_fc{}".format(idx), layer_size, init_scale=np.sqrt(2)))
-
-    traj_hat = act_fun(linear(traj_hat, "traj_hat", traj_size, init_scale=np.sqrt(2)))
-    return traj_hat
-
 
 def init_goal_vae(state_dim, z_dim, goal_dim, batch_size=None):
-    goal_input_ph = tf.placeholder(shape=(batch_size, z_dim+state_dim), dtype=tf.float32, name="goal_input")
-    processed_goal_input = tf.to_float(goal_input_ph)
+    goal_start_ph = tf.placeholder(shape=(batch_size, state_dim), dtype=tf.float32, name="goal_input")
+    processed_goal_start = tf.to_float(goal_start_ph)
 
-    goal_ph = tf.placeholder(shape=(batch_size, goal_dim+z_dim), dtype=tf.float32, name="g_sample")
-    processed_goal = tf.to_float(goal_ph)
-
-    return goal_input_ph, processed_goal_input, goal_ph, processed_goal
+    return goal_start_ph, processed_goal_start
 
 
 def goal_encoder(flat_goal_input, enc_arch, goal_dim, act_fun):
@@ -157,10 +104,8 @@ def goal_encoder(flat_goal_input, enc_arch, goal_dim, act_fun):
 
     mn = act_fun(linear(latent_goal, "gmean", goal_dim, init_scale=np.sqrt(2)))
     sd = 0.5 * act_fun(linear(latent_goal, "gstd", goal_dim, init_scale=np.sqrt(2)))
-    eps = tf.random_normal(shape=[tf.shape(latent_goal)[0], goal_dim], mean=0.0, stddev=1.0)
-    g  = mn + tf.multiply(eps, tf.exp(sd))
 
-    return g, mn, sd
+    return mn, sd
 
 
 def goal_decoder(flat_goal, dec_arch, state_dim, act_fun):
@@ -192,13 +137,13 @@ def init_skill_vae(traj_size, state_dim, z_dim, enc_num=32, dec_num=64, batch_si
     trajectory_ph = tf.placeholder(shape=(batch_size,) + (traj_size, 1), dtype=tf.float32, name="traj")
     processed_trajectory = tf.to_float(trajectory_ph)
 
-    state_skill_ph = tf.placeholder(shape=(batch_size,) + (state_dim+z_dim, 1), dtype=tf.float32, name="z_sample")
-    processed_state_skill = tf.to_float(state_skill_ph)
+    state_start_ph = tf.placeholder(shape=(batch_size,) + (state_dim, 1), dtype=tf.float32, name="z_sample")
+    processed_state_start = tf.to_float(state_start_ph)
 
     lstm_enc = tf.contrib.rnn.LSTMCell(enc_num)
     lstm_dec = tf.contrib.rnn.LSTMCell(dec_num)
 
-    return trajectory_ph, processed_trajectory, lstm_enc, state_skill_ph, processed_state_skill, lstm_dec
+    return trajectory_ph, processed_trajectory, lstm_enc, state_start_ph, processed_state_start, lstm_dec
 
 
 def skill_encoder(lstm_enc, trajectory, enc_arch, z_dim, act_fun):
@@ -222,10 +167,8 @@ def skill_encoder(lstm_enc, trajectory, enc_arch, z_dim, act_fun):
 
     mn = act_fun(linear(latent_skill, "zmean", z_dim, init_scale=np.sqrt(2)))
     sd = 0.5 * act_fun(linear(latent_skill, "zstd", z_dim, init_scale=np.sqrt(2)))
-    eps = tf.random_normal(shape=[tf.shape(latent_skill)[0], z_dim], mean=0.0, stddev=1.0)
-    z  = mn + tf.multiply(eps, tf.exp(sd))
 
-    return z, mn, sd
+    return mn, sd
 
 
 def skill_decoder(lstm_dec, states_skill, dec_arch, traj_len, state_dim, act_fun, batch_size=None):
@@ -276,48 +219,45 @@ def skill_decoder(lstm_dec, states_skill, dec_arch, traj_len, state_dim, act_fun
     return traj_hat
 
 class LatentSkillsPolicy(FeedForwardPolicy):
-    def __init__(self, sess, ob_space, st_space, ac_space, z_dim, goal_dim, traj_len, n_env, n_steps, n_batch, reuse=False, **_kwargs):
+    def __init__(self, sess, ob_space, st_space, ac_space, z_dim, g_dim, traj_len, n_env, n_steps, n_batch, reuse=False, **_kwargs):
         super(LatentSkillsPolicy, self).__init__(sess, ob_space, ac_space, n_env, n_steps, n_batch, reuse,
                                                  feature_extraction="mlp", **_kwargs)
 
         self.z_dim = z_dim
-        self.goal_dim = goal_dim
+        self.g_dim = goal_dim
         self.state_dim = st_space.shape[0]
         self.traj_len = traj_len
         self.initial_state = None
         self.current_skill = None
-        self.skill_count = 0
+        self.skill_count = tf.Variable(0, name='skill_count')
+        self.z_sample = tf.zeros([n_batch, z_dim], dtype=tf.float32)
+        self.g_sample = tf.zeros([n_batch, g_dim], dtype=tf.float32)
 
-        # TODO: Set up VAE inputs, model, and outputs
         # sets up trajectory inputs for vae encoder network
         traj_size = traj_len * self.state_dim
-        with tf.variable_scope("skill_vae_inputs", reuse=False):
-            self.traj_ph, self.processed_traj, self.lstm_enc, self.state_skill_ph, self.processed_state_skill, self.lstm_dec = \
-            init_skill_vae(traj_size, self.state_dim, self.z_dim)
+        with tf.variable_scope("input", reuse=False):
+            self.traj_ph, self.processed_traj, self.lstm_enc, self.state_start_ph, self.processed_state_start, self.lstm_dec = \
+                init_skill_vae(traj_size, self.state_dim, self.z_dim)
+            self.processed_state_skill = tf.concat([self.processed_state_start, self.z_sample], axis=1)
 
-        with tf.variable_scope("goal_cvae_inputs", reuse=False):
-            self.goal_input_ph, self.processed_goal_input, self.goal_ph, self.processed_goal = \
-            init_goal_vae(self.state_dim, self.z_dim, self.goal_dim)
+            self.goal_start_ph, self.processed_goal_start = \
+                init_goal_vae(self.state_dim, self.z_dim, self.goal_dim)
+            self.processed_goal_input = tf.concat([self.processed_goal_start, self.z_sample], axis=1)
 
-        with tf.variable_scope("skill_vae_model", reuse=reuse):
-            self.z_sample, self.z_mean, self.z_stddev = \
-            skill_encoder(self.lstm_enc, tf.layers.flatten(self.processed_traj), self.enc_arch, self.z_dim, self.act_fun)
+        with tf.variable_scope("model", reuse=reuse):
+            with tf.variable_scope("skill_vae", reuse=reuse):
+                self.z_mean, self.z_stddev = \
+                    skill_encoder(self.lstm_enc, tf.layers.flatten(self.processed_traj), self.enc_arch, self.z_dim, self.act_fun)
 
-        with tf.variable_scope("goal_cvae_model", reuse=reuse):
-            self.g_sample, self.g_mean, self.g_stddev = \
-            goal_encoder(tf.layers.flatten(self.processed_goal_input), self.enc_arch, self.goal_dim, self.act_fun)
-
-        with tf.variable_scope("skill_vae_outputs", reuse=True):
-            self.traj_hat = skill_decoder(self.lstm_dec, tf.layers.flatten(self.processed_state_skill), self.dec_arch,
-                                          self.traj_len,self.state_dim, self.act_fun)
-
-        with tf.variable_scope("goal_cvae_outputs", reuse=True):
-            self.state_I_hat, self.initiation_mn, self.initiation_stddev = \
-            goal_decoder(tf.layers.flatten(self.processed_goal), self.dec_arch, self.state_dim, self.act_fun)
+            with tf.variable_scope("goal_cvae", reuse=reuse):
+                self.g_mean, self.g_stddev = \
+                    goal_encoder(tf.layers.flatten(self.processed_goal_input), self.enc_arch, self.g_dim, self.act_fun)
 
         # sets up observation space inputs for policy and value function networks
-        with tf.variable_scope("obz_input", reuse=False):
-            self.input_ph, self.processed_input = observation_skill_input(ob_space, z_dim, n_batch, scale=False)     # unscaled b/c mlp, not cnn
+        with tf.variable_scope("input", reuse=False):
+            self.obs_ph, self.processed_obs = observation_input(ob_space, n_batch, scale=False)     # unscaled b/c mlp, not cnn
+            self.processed_input = tf.concat([self.processed_obs, self.z_sample], axis=1)
+
 
         # sets up shapes/models of policy and value function networks
         with tf.variable_scope("model", reuse=reuse):
@@ -331,23 +271,63 @@ class LatentSkillsPolicy(FeedForwardPolicy):
 
         # sets up the outputs self.action, self.deterministic_action, and self.neglogp from self.proba_distribution
         # and from self.policy
-        # TODO: May need to change outputs of policy networks?
         self._setup_init()
 
-    def step(self, obs, state=None, mask=None, deterministic=False):
+        self.z_sample, self.traj_hat = tf.cond(self.skill_count >= self.traj_len,
+                                               lambda: self.sample_skill_traj(),
+                                               lambda: (self.z_sample, self.traj_hat))
+        self.g_sample, self.initiation_mn, self.initiation_stddev = tf.cond(self.skill_count >= self.traj_len,
+                                                                             lambda: self.sample_goal_initiation(self.z_sample),
+                                                                             lambda: self.g_sample)
 
-        if self.current_skill is None or self.skill_count == self.traj_len:
-            self.current_skill = np.random.randn(self.z_dim)
-            self.skill_count = 0
+    def sample_skill_traj(self):
+        mn = self.z_mean
+        sd = self.z_stddev
+        eps = tf.random_normal(shape=[tf.shape(mn)[0], self.z_dim], mean=0.0, stddev=1.0)
+        z  = mn + tf.multiply(eps, tf.exp(sd))
+
+        self.processed_state_skill = tf.concat([self.processed_state_start, z], axis=1)
+        traj_hat = skill_decoder(self.lstm_dec, tf.layers.flatten(self.processed_state_skill), self.dec_arch,
+                                              self.traj_len, self.state_dim, self.act_fun)
+        return z, traj_hat
+
+    def sample_goal_initiation(self, z):
+        mn = self.g_mean
+        sd = self.g_stddev
+        eps = tf.random_normal(shape=[tf.shape(mn)[0], self.g_dim], mean=0.0, stddev=1.0)
+        g  = mn + tf.multiply(eps, tf.exp(sd))
+
+        self.processed_goal = tf.concat([g, z], axis=1)
+        _, initiation_mn, initiation_stddev = \
+            goal_decoder(tf.layers.flatten(self.processed_goal), self.dec_arch, self.state_dim, self.act_fun)
+
+        self.skill_count = tf.Variable(0, 'skill_count')
+        return g, initiation_mn, initiation_stddev
+
+    def step(self, obs, traj, traj_start, state=None, mask=None, deterministic=False):
 
         if deterministic:
-            action, value, neglogp = self.sess.run([self.deterministic_action, self._value, self.neglogp],
-                                                   {self.input_ph: np.hstack([obs, self.current_skill])})
+            action, value, neglogp, skill, goal, traj_hat, init_mn, init_stddev, self.skill_count = \
+                self.sess.run([self.deterministic_action, self._value, self.neglogp,
+                               self.z_sample, self.g_sample, self.traj_hat, self.initiation_mn,
+                               self.initiation_stddev, tf.add(self.skill_count, 1)],
+                              {self.obs_ph: obs, self.traj_ph: traj, self.goal_start_ph: traj_start,
+                               self.state_start_ph: traj_start})
         else:
-            action, value, neglogp = self.sess.run([self.action, self._value, self.neglogp],
-                                                   {self.input_ph: np.hstack([obs, self.current_skill])})
+            action, value, neglogp, skill, goal, traj_hat, init_mn, init_stddev, self.skill_count = \
+                self.sess.run([self.action, self._value, self.neglogp, self.z_sample, self.g_sample,
+                               self.traj_hat, self.initiation_mn, self.initiation_stddev, tf.add(self.skill_count, 1)],
+                              {self.obs_ph: obs, self.traj_ph: traj, self.goal_start_ph: traj_start,
+                               self.state_start_ph: traj_start})
 
-        self.skill_count += 1
+        self.z_sample, self.traj_hat = tf.cond(self.skill_count >= self.traj_len,
+                                               lambda: self.sample_skill_traj(),
+                                               lambda: (self.z_sample, self.traj_hat))
+        self.g_sample, self.initiation_mn, self.initiation_stddev = tf.cond(self.skill_count >= self.traj_len,
+                                                                             lambda: self.sample_goal_initiation(self.z_sample),
+                                                                             lambda: self.g_sample)
+
+        #TODO: how do I send the necessary info: skill, goal, traj_hat, init_mn, init_stddev, when only new samples are taken?
         return action, value, self.initial_state, neglogp
 
     def proba_step(self, obs, state=None, mask=None):

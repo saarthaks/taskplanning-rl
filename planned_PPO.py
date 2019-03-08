@@ -49,29 +49,94 @@ class PlannedPPO(PPO2):
                 n_batch_step = None
                 n_batch_train = None
 
-                act_model = self.policy(self.sess, self.observation_space, self.action_space, self.z_dim, self.traj_len,
-                                        self.n_envs, 1, n_batch_step, reuse=False, **self.policy_kwargs)
+                act_model = self.policy(self.sess, self.observation_space, self.action_space, self.z_dim, self.goal_dim,
+                                        self.traj_len, self.n_envs, 1, n_batch_step, reuse=False, **self.policy_kwargs)
                 with tf.variable_scope("train_model", reuse=True,
                                        custom_getter=tf_util.outer_scope_getter("train_model")):
-                    train_model = self.policy(self.sess, self.observation_space, self.action_space, self.z_dim,
+                    train_model = self.policy(self.sess, self.observation_space, self.action_space, self.z_dim, self.goal_dim,
                                               self.traj_len, self.n_envs // self.nminibatches, self.n_steps,
                                               n_batch_train, reuse=True, **self.policy_kwargs)
-                #TODO
                 with tf.variable_scope("loss", reuse=False):
-                    pass
+                    self.action_ph = train_model.pdtype.sample_placeholder([None], name="action_ph")
+                    self.advs_ph = tf.placeholder(tf.float32, [None], name="advs_ph")
+                    self.rewards_ph = tf.placeholder(tf.float32, [None], name="rewards_ph")
+                    self.old_neglog_pac_ph = tf.placeholder(tf.float32, [None], name="old_neglog_pac_ph")
+                    self.old_vpred_ph = tf.placeholder(tf.float32, [None], name="old_vpred_ph")
+                    self.learning_rate_ph = tf.placeholder(tf.float32, [], name="learning_rate_ph")
+                    self.clip_range_ph = tf.placeholder(tf.float32, [], name="clip_range_ph")
+                    #TODO: add placeholders for vae and cvae loss functions
+                    self.trajectory_ph = tf.placeholder(tf.float32, [None], name="trajectory_ph")
+                    self.trajectory_hat_ph = tf.placeholder(tf.float32, [None], name="trajectory_hat_ph")
+                    self.z_mean_ph = tf.placeholder(tf.float32, [None], name="z_mean_ph")
+                    self.z_stddev_ph = tf.placeholder(tf.float32, [None], "z_stddev_ph")
 
-                #TODO
+                    neglogpac = train_model.proba_distribution.neglogp(self.action_ph)
+                    self.entropy = tf.reduce_mean(train_model.proba_distribution.entropy())
+
+                    vpred = train_model._value
+                    vpredclipped = self.old_vpred_ph + tf.clip_by_value(
+                        train_model._value - self.old_vpred_ph, -self.clip_range_ph, self.clip_range_ph)
+                    vf_losses1 = tf.square(vpred - self.rewards_ph)
+                    vf_losses2 = tf.square(vpredclipped - self.rewards_ph)
+                    self.vf_loss = 0.5 * tf.reduce_mean(tf.maximum(vf_losses1, vf_losses2))
+                    ratio = tf.exp(self.old_neglog_pac_ph - neglogpac)
+                    pg_losses = -self.advs_ph * ratio
+                    pg_losses2 = -self.advs_ph * tf.clip_by_value(ratio, 1.0 - self.clip_range_ph, 1.0 +
+                                                                  self.clip_range_ph)
+                    self.pg_loss = tf.reduce_mean(tf.maximum(pg_losses, pg_losses2))
+                    self.approxkl = 0.5 * tf.reduce_mean(tf.square(neglogpac - self.old_neglog_pac_ph))
+                    self.clipfrac = tf.reduce_mean(tf.to_float(tf.greater(tf.abs(ratio - 1.0), self.clip_range_ph)))
+                    loss = self.pg_loss - self.entropy * self.ent_coef + self.vf_loss * self.vf_coef
+                    #TODO: add loss terms from vae and cvae to loss expression above
+                    traj_loss = tf.reduce_sum(tf.squared_difference(self.trajectory_ph, self.trajectory_hat_ph), 1)
+                    latent_skill_loss = -0.5 * tf.reduce_sum(1.0 + 2.0 * self.z_stddev_ph - tf.square(self.z_mean_ph) - \
+                                                             tf.exp(2.0 * self.z_stddev_ph), 1)
+                    self.skill_vae_loss = tf.reduce_mean(traj_loss + latent_skill_loss)
+                    loss += self.skill_vae_loss
+
+                    tf.summary.scalar('entropy_loss', self.entropy)
+                    tf.summary.scalar('policy_gradient_loss', self.pg_loss)
+                    tf.summary.scalar('value_function_loss', self.vf_loss)
+                    tf.summary.scalar('approximate_kullback-leiber', self.approxkl)
+                    tf.summary.scalar('clip_factor', self.clipfrac)
+                    tf.summary.scalar('loss', loss)
+
+                #TODO: confirm all trainable variables are captured in scope "model"
                 with tf.variable_scope("model"):
-                    pass
-
-                #TODO: Huh??
+                    self.params = tf.trainable_variables()
+                    if self.full_tensorboard_log:
+                        for var in self.params:
+                            tf.summary.histogram(var.name, var)
                 grads = tf.gradients(loss, self.params)
                 if self.max_grad_norm is not None:
                     grads, _grad_norm = tf.clip_by_global_norm(grads, self.max_grad_norm)
                 grads = list(zip(grads, self.params))
+
             trainer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph, epsilon=1e-5)
             self._train = trainer.apply_gradients(grads)
-            #TODO: MORE...
+
+            #TODO: include vae and cvae losses
+            self.loss_names = ['policy_loss', 'value_loss', 'policy_entropy', 'approxkl', 'clipfrac']
+
+            with tf.variable_scope("input_info", reuse=False):
+                    tf.summary.scalar('discounted_rewards', tf.reduce_mean(self.rewards_ph))
+                    tf.summary.scalar('learning_rate', tf.reduce_mean(self.learning_rate_ph))
+                    tf.summary.scalar('advantage', tf.reduce_mean(self.advs_ph))
+                    tf.summary.scalar('clip_range', tf.reduce_mean(self.clip_range_ph))
+                    tf.summary.scalar('old_neglog_action_probabilty', tf.reduce_mean(self.old_neglog_pac_ph))
+                    tf.summary.scalar('old_value_pred', tf.reduce_mean(self.old_vpred_ph))
+
+                    if self.full_tensorboard_log:
+                        tf.summary.histogram('discounted_rewards', self.rewards_ph)
+                        tf.summary.histogram('learning_rate', self.learning_rate_ph)
+                        tf.summary.histogram('advantage', self.advs_ph)
+                        tf.summary.histogram('clip_range', self.clip_range_ph)
+                        tf.summary.histogram('old_neglog_action_probabilty', self.old_neglog_pac_ph)
+                        tf.summary.histogram('old_value_pred', self.old_vpred_ph)
+                        if tf_util.is_image(self.observation_space):
+                            tf.summary.image('observation', train_model.obs_ph)
+                        else:
+                            tf.summary.histogram('observation', train_model.obs_ph)
 
             self.train_model = train_model
             self.act_model = act_model
@@ -80,10 +145,9 @@ class PlannedPPO(PPO2):
             self.value = act_model.value
             self.initial_state = act_model.initial_state
             tf.global_variables_initializer().run(session=self.sess)
+            #TODO: consider saving other quantities to "self"
 
             self.summary = tf.summary.merge_all()
-
-        return NotImplementedError
 
     #TODO
     def _train_step(self, learning_rate, cliprange, obs, returns, masks, actions, values, neglogpacs, update, writer,
@@ -93,6 +157,37 @@ class PlannedPPO(PPO2):
     #TODO
     def learn(self, total_timesteps, callback=None, seed=None, log_interval=1, tb_log_name="PlannedPPO",
               reset_num_timesteps=True):
+        self.learning_rate = get_schedule_fn(self.learning_rate)
+        self.cliprange = get_schedule_fn(self.cliprange)
+
+        new_tb_log = self._init_num_timesteps(reset_num_timesteps)
+
+        with SetVerbosity(self.verbose), TensorboardWriter(self.graph, self.tensorboard_log, tb_log_name, new_tb_log) \
+            as writer:
+
+            self._setup_learn(seed)
+
+            runner = Runner(env=self.env, model=self, n_steps=self.n_steps, gamma=self.gamma, lam=self.lam)
+            self.episode_reward = np.zeros((self.n_envs,))
+
+            ep_info_buf = deque(maxlen=100)
+            t_first_start = time.time()
+
+            nupdates = total_timesteps // self.n_batch
+            for update in range(1, nupdates + 1):
+                assert self.n_batch % self.nminibatches == 0
+                batch_size = self.n_batch // self.nminibatches
+                t_start = time.time()
+                frac = 1.0 - (update - 1.0) / nupdates
+                lr_now = self.learning_rate(frac)
+                cliprangenow = self.cliprange(frac)
+                # true_reward is reward without discount
+                obs, returns, masks, actions, values, neglogpacs, states, ep_infos, true_reward = runner.run()
+
+        return NotImplementedError
+
+    #TODO
+    def plan(self):
         return NotImplementedError
 
     #TODO: Check if any more needs saving
@@ -202,3 +297,30 @@ class Runner(AbstractEnvRunner):
             map(swap_and_flatten, (mb_obs, mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs, true_reward))
 
         return mb_obs, mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs, mb_states, ep_infos, true_reward
+
+
+def get_schedule_fn(value_schedule):
+    """
+    Transform (if needed) learning rate and clip range
+    to callable.
+    :param value_schedule: (callable or float)
+    :return: (function)
+    """
+    # If the passed schedule is a float
+    # create a constant function
+    if isinstance(value_schedule, float):
+        value_schedule = constfn(value_schedule)
+    else:
+        assert callable(value_schedule)
+    return value_schedule
+
+
+# obs, returns, masks, actions, values, neglogpacs, states = runner.run()
+def swap_and_flatten(arr):
+    """
+    swap and then flatten axes 0 and 1
+    :param arr: (np.ndarray)
+    :return: (np.ndarray)
+    """
+    shape = arr.shape
+    return arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
